@@ -47,7 +47,8 @@ class FieldExtraction:
 
     def as_dict(self) -> dict:
         reliability = "NOT_DETECTED" if self.value in (None, "") else (
-            "UNCERTAIN" if self.confidence is None or self.confidence < settings.ocr_field_low_confidence_threshold else "RELIABLE"
+            "UNCERTAIN" if self.validation_status == "UNCERTAIN" or self.confidence is None
+            or self.confidence < settings.ocr_field_low_confidence_threshold else "RELIABLE"
         )
         return {
             "value": self.value,
@@ -129,6 +130,39 @@ def _detect_signature_region(image: np.ndarray, image_width: int, image_height: 
     return detected, bbox
 
 
+def _row_neighbours(label: WordBox, words: list[WordBox], *, right_only: bool = True) -> list[WordBox]:
+    """Find OCR boxes on the label's visual row using box height as scale."""
+    result = []
+    for word in words:
+        if word is label or (right_only and word.left < label.right):
+            continue
+        vertical_overlap = min(label.bottom, word.bottom) - max(label.top, word.top)
+        center_delta = abs(label.center[1] - word.center[1])
+        if vertical_overlap > 0 or center_delta <= max(label.height, word.height) * 0.6:
+            result.append(word)
+    return sorted(result, key=lambda word: word.left)
+
+
+def _join_overlapping_numeric_boxes(boxes: list[WordBox]) -> str:
+    """Join date fragments, removing a duplicated digit only when OCR boxes overlap."""
+    fragments = [re.sub(r"\D", "", word.text) for word in boxes]
+    fragments = [fragment for fragment in fragments if fragment]
+    if not fragments:
+        return ""
+    value = fragments[0]
+    for previous, word, fragment in zip(boxes, boxes[1:], fragments[1:]):
+        overlap = previous.right - word.left
+        if overlap > 0:
+            duplicate = 0
+            for size in range(1, min(len(value), len(fragment), 3) + 1):
+                if value.endswith(fragment[:size]):
+                    duplicate = size
+            value += fragment[duplicate:]
+        else:
+            value += fragment
+    return value
+
+
 def extract_cheque_data(cheque_id: str, ocr_result: OCRRawResult, image: np.ndarray) -> ChequeExtractionResult:
     start = time.perf_counter()
 
@@ -161,9 +195,11 @@ def extract_cheque_data(cheque_id: str, ocr_result: OCRRawResult, image: np.ndar
         candidate = field_parsers.strip_known_label(pattern_name or name, candidate)
         normalized = _NORMALIZERS[name](candidate) if name in _NORMALIZERS else candidate
         candidate_lower = candidate.lower()
-        candidate_tokens = set(candidate_lower.split())
-        evidence_words = [w for w in words if w.text.lower().strip(".:,/-") in candidate_tokens
-                          or candidate_lower in w.text.lower()]
+        candidate_tokens = set(re.findall(r"[a-z0-9]+", candidate_lower))
+        evidence_words = [w for w in words if candidate_tokens.intersection(
+            re.findall(r"[a-z0-9]+", w.text.lower())) or (
+                len(re.sub(r"\D", "", w.text)) >= 3
+                and re.sub(r"\D", "", w.text) in re.sub(r"\D", "", candidate))]
         confidence = (sum(w.confidence for w in evidence_words) / len(evidence_words)) if evidence_words else None
         return FieldExtraction(normalized, candidate, confidence, "ocr_spatial" if confidence is not None else "ocr_fallback")
 
@@ -178,7 +214,15 @@ def extract_cheque_data(cheque_id: str, ocr_result: OCRRawResult, image: np.ndar
     ifsc_words = [w for w in words if ifsc_match and ifsc_match.group(0).lower() in w.text.lower()]
     ifsc_confidence = sum(w.confidence for w in ifsc_words) / len(ifsc_words) if ifsc_words else None
     ifsc = FieldExtraction(ifsc_match.group(0).upper(), ifsc_match.group(0), ifsc_confidence, "ocr_pattern") if ifsc_match else FieldExtraction(None, None, None, None)
-    date_candidate = labelled(r"(?:Date|Dated)\s*[:\-]?\s*(\d{1,4}[/\-.]\d{1,2}[/\-.]\d{1,4}|\d{1,2}[-/ ]+[A-Za-z]{3,9}[-/ ]+\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})")
+    date_label = next((w for w in words if re.fullmatch(r"date|dated", w.text.strip(".:"), re.I)), None)
+    date_candidate = None
+    if date_label:
+        date_fragments = [w for w in _row_neighbours(date_label, words)
+                          if re.search(r"\d", w.text) and re.fullmatch(r"[\d/.,-]+", w.text.strip())]
+        if date_fragments:
+            date_candidate = _join_overlapping_numeric_boxes(date_fragments)
+    if date_candidate is None:
+        date_candidate = labelled(r"(?:Date|Dated)\s*[:\-]?\s*(\d{1,4}[/\-.]\d{1,2}[/\-.]\d{1,4}|\d{1,2}[-/ ]+[A-Za-z]{3,9}[-/ ]+\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}|\d{8})")
     if date_candidate is None:
         labelled_date_text = labelled(r"(?:Date|Dated)\s*[:\-]?\s*([^\n]+)")
         if labelled_date_text and normalization.normalize_date(labelled_date_text) is None:
@@ -186,13 +230,25 @@ def extract_cheque_data(cheque_id: str, ocr_result: OCRRawResult, image: np.ndar
         else:
             date_candidate = field_parsers.parse_unlabelled_date(text)
     date = field("date", date_candidate)
-    payee_value = labelled(r"(?:Pay\s+to(?:\s+the\s+order\s+of)?|Payee)\s*[:\-]?\s*([^\n]+)")
+    payee_label = next((w for w in words if re.fullmatch(r"pay(?:ee)?", w.text.strip(".:"), re.I)), None)
+    payee_value = None
+    if payee_label:
+        payee_boxes = [w for w in _row_neighbours(payee_label, words)
+                       if re.search(r"[A-Za-z]", w.text)
+                       and w.text.strip(".:,-").lower() not in {"to", "the", "order", "of"}]
+        if payee_boxes:
+            payee_value = " ".join(w.text for w in payee_boxes)
+    if payee_value is None:
+        payee_value = labelled(r"(?:Pay\s+to(?:\s+the\s+order\s+of)?|Payee)\s*[:\-]?\s*([^\n]+)")
     if payee_value is None:
         # A label may be one OCR line and the handwritten value the next.
         for i, line in enumerate(lines[:-1]):
             if re.search(r"\b(?:Pay|Payee)\b", line, re.I):
                 payee_value = lines[i + 1]
                 break
+    if payee_value:
+        # Negotiable-instrument boilerplate often follows the handwritten name.
+        payee_value = re.sub(r"\s+or\s*bearer\b.*$", "", payee_value, flags=re.I).strip()
     if payee_value and (not re.fullmatch(r"[A-Za-z][A-Za-z .,&'-]*", payee_value.strip())
                         or re.search(r"\b(?:date|amount|account|cheque|check|bank|rupees|ifsc)\b", payee_value, re.I)):
         payee_value = None
@@ -204,13 +260,29 @@ def extract_cheque_data(cheque_id: str, ocr_result: OCRRawResult, image: np.ndar
         amount_label_text = labelled(r"Amount(?!\s+in\s+words)\s*[:\-]?\s*([^\n]+)")
         amount_raw = amount_label_text.strip() if amount_label_text else None
     if amount_raw is None:
-        # A numeric amount should have decimal/currency evidence, avoiding
-        # accidental use of cheque/account identifiers as money.
-        amount_match = re.search(r"\b\d{1,3}(?:,\d{2,3})*(?:\.\d{1,2})\b", text)
-        amount_raw = amount_match.group(0) if amount_match else None
+        # A printed/handwritten RUPEES label and a numeric box on the same
+        # visual row provide currency context even when no symbol is present.
+        rupees_label = next((w for w in words if re.fullmatch(r"rupees?", w.text.strip(".:"), re.I)), None)
+        if rupees_label:
+            numeric_boxes = [w for w in _row_neighbours(rupees_label, words)
+                             if re.fullmatch(r"(?:\d{1,3}(?:,\d{2,3})+|\d{3,})(?:\.\d{1,2})?", w.text.strip())]
+            if numeric_boxes:
+                amount_raw = max(numeric_boxes, key=lambda w: (w.left, w.confidence)).text
+        if amount_raw is None:
+            # Without a label or currency marker accept only conventional
+            # grouped/decimal forms; plain identifiers are not money evidence.
+            amount_match = re.search(r"\b\d{1,3}(?:,\d{2,3})+(?:\.\d{1,2})?\b|\b\d+\.\d{1,2}\b", text)
+            amount_raw = amount_match.group(0) if amount_match else None
     amount = field("amount", amount_raw)
     words_match = re.search(r"(?:Amount\s+in\s+words|Rupees)\s*[:\-]?\s*([^\n]+)", text, re.I)
     amount_words_value = words_match.group(1) if words_match else None
+    rupees_label = next((w for w in words if re.fullmatch(r"rupees?", w.text.strip(".:"), re.I)), None)
+    if rupees_label:
+        phrase_boxes = [w for w in _row_neighbours(rupees_label, words)
+                        if re.search(r"[A-Za-z]", w.text)
+                        and not re.search(r"\b(?:only|payee|account|date|ifsc)\b", w.text, re.I)]
+        if phrase_boxes:
+            amount_words_value = " ".join(w.text for w in phrase_boxes)
     if amount_words_value is None:
         from app.services.validation.amount_words import words_to_amount
         phrases = [line for line in lines if len(line.split()) >= 3 and words_to_amount(line) is not None]
@@ -228,6 +300,14 @@ def extract_cheque_data(cheque_id: str, ocr_result: OCRRawResult, image: np.ndar
         micr_raw = " ".join(w.text for w in sorted(micr_words, key=lambda item: item.left))
         fields["micr"] = FieldExtraction(re.sub(r"\D", "", micr_raw), micr_raw,
                                              sum(w.confidence for w in micr_words)/len(micr_words), "ocr_spatial")
+        if fields["cheque_number"].value is None:
+            # In Indian MICR encoding the leading six digits carry the
+            # cheque serial number. Require a full MICR-length digit sequence
+            # so an arbitrary footer number is not promoted to an identifier.
+            micr_digits = fields["micr"].value
+            if re.fullmatch(r"\d{15,}", micr_digits or ""):
+                fields["cheque_number"] = FieldExtraction(
+                    micr_digits[:6], micr_raw, fields["micr"].confidence, "ocr_micr_pattern")
 
     signature_detected, signature_bbox = _detect_signature_region(image, width, height)
 
@@ -253,6 +333,10 @@ def extract_cheque_data(cheque_id: str, ocr_result: OCRRawResult, image: np.ndar
         amount_status = "PASS" if abs(float(numeric_amount) - words_amount) < 0.01 else "FAIL"
     elif fields["amount_in_words"].value and words_amount is None:
         amount_status = "UNCERTAIN"
+        fields["amount_in_words"].validation_status = "UNCERTAIN"
+        warnings.append("amount_in_words could not be validated from the recognized wording.")
+    if amount_status == "FAIL":
+        warnings.append("Numeric amount and amount in words do not match.")
     return ChequeExtractionResult(
         cheque_id=cheque_id,
         template="GENERALIZED_LAYOUT",

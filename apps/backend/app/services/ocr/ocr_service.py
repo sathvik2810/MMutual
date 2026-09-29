@@ -19,6 +19,22 @@ from app.services.ocr.tesseract_engine import get_ocr_engine, get_tesseract_engi
 from app.services.preprocessing.preprocessing_service import load_image_bgr
 
 
+def _extraction_quality(result: OCRRawResult, image) -> int:
+    """Score usable field evidence so confident but incomplete OCR can fall back."""
+    from app.services.extraction.extraction_service import REQUIRED_FIELDS, extract_cheque_data
+    from app.services.validation.amount_words import words_to_amount
+
+    extraction = extract_cheque_data("ocr_quality_check", result, image)
+    score = sum(extraction.fields.get(name) is not None
+                and extraction.fields[name].value not in (None, "") for name in REQUIRED_FIELDS)
+    words = extraction.fields.get("amount_in_words")
+    if words and words.value and words_to_amount(str(words.value)) is not None:
+        score += 1
+    if extraction.validation_results.get("amount_consistency", {}).get("status") == "PASS":
+        score += 1
+    return score
+
+
 @dataclass
 class OCRRunOutcome:
     result: OCRRawResult
@@ -67,6 +83,27 @@ def run_ocr_for_cheque(
                 result.error_message = "Primary OCR fallback: " + "; ".join(errors)
         except Exception as exc:
             errors.append(str(exc))
+    elif result is not None and engine.name != "Tesseract":
+        # OCR can return many high-confidence boxes while missing a labeled
+        # cheque field. Use Tesseract as a genuine fallback when its
+        # extraction evidence scores better, retaining Paddle on ties.
+        try:
+            primary_score = _extraction_quality(result, processed_image)
+            fallback = get_tesseract_engine()
+            attempts += 1
+            fallback_result = fallback.run(processed_image)
+            if (fallback_result.status not in ("FAILED", "PARTIAL", "LOW_CONFIDENCE")
+                    and fallback_result.raw_text.strip() and len(fallback_result.words) >= 2
+                    and _extraction_quality(fallback_result, processed_image) > primary_score):
+                fallback_result.error_message = (
+                    f"PaddleOCR extraction incomplete (quality {primary_score}); "
+                    "Tesseract fallback produced stronger field evidence."
+                )
+                result = fallback_result
+        except Exception as exc:
+            # Fallback quality evaluation is best-effort; retain valid Paddle
+            # output when Tesseract is unavailable or itself errors.
+            errors.append(f"Tesseract quality fallback unavailable: {exc}")
     elif result is None:
         # A caller may explicitly inject Tesseract for isolated adapter use.
         result = OCRRawResult(engine.name, engine.version, "", status="FAILED", error_message="; ".join(errors))

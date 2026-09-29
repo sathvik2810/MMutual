@@ -58,6 +58,37 @@ def test_insufficient_paddle_text_automatically_uses_tesseract(monkeypatch):
     assert outcome.result.engine_name == "Tesseract"
 
 
+def test_tesseract_replaces_usable_but_incomplete_paddle_extraction(monkeypatch):
+    from app.services.ocr.engine import WordBox
+
+    primary_result = OCRRawResult(
+        "PaddleOCR", "fake", "Account No 1234567890", [
+            WordBox("Account", 1, 1, 30, 10, 95), WordBox("1234567890", 35, 1, 80, 10, 95),
+        ], 95, 200, 100, status="COMPLETED",
+    )
+    fallback_result = OCRRawResult(
+        "Tesseract", "fake", "Payee Mira Traders", [
+            WordBox("Payee", 1, 1, 30, 10, 90), WordBox("Mira", 35, 1, 30, 10, 92),
+        ], 91, 200, 100, status="COMPLETED",
+    )
+
+    class Fallback:
+        name, version = "Tesseract", "fake"
+        def run(self, image, **kwargs): return fallback_result
+
+    monkeypatch.setattr("app.services.ocr.ocr_service.load_image_bgr", lambda _: np.zeros((20, 20, 3)))
+    monkeypatch.setattr("app.services.ocr.ocr_service.get_tesseract_engine", lambda: Fallback())
+    monkeypatch.setattr(
+        "app.services.ocr.ocr_service._extraction_quality",
+        lambda result, image: 4 if result.engine_name == "PaddleOCR" else 6,
+    )
+    outcome = run_ocr_for_cheque("processed", "original", engine=_Paddle(result=primary_result))
+
+    assert outcome.result.engine_name == "Tesseract"
+    assert outcome.attempts == 2
+    assert "stronger field evidence" in outcome.result.error_message
+
+
 def test_labeled_extraction_supports_different_text_layout_and_formats():
     from app.services.ocr.engine import OCRRawResult
     text = """Account No: 9876543210
@@ -93,6 +124,55 @@ def test_unlabelled_date_is_not_guessed_when_multiple_candidates_exist():
 def test_indian_lakh_wording_is_parsed_without_guessing():
     assert words_to_amount("One Lakh Twenty Five Thousand Rupees Only") == 125000
     assert words_to_amount("One Thousand Nonsense Rupees") is None
+
+
+def test_spatial_labels_extract_compact_date_payee_and_amount_with_boxes():
+    from app.services.ocr.engine import WordBox
+
+    def box(text, x, y, w=80, h=24, conf=94, line=1):
+        return WordBox(text, x, y, w, h, conf, 1, 1, line, 1)
+
+    words = [
+        box("Date", 1000, 40, 70, 24),
+        # Adjacent overlapping recognitions are fragments of one labeled date.
+        box("25012", 1090, 40, 110, 32, line=2),
+        box("2016", 1190, 42, 100, 30, line=3),
+        box("Pay", 20, 120, 55, 28, line=4),
+        box("Mira Traders", 130, 115, 250, 38, 91, line=5),
+        box("ORBEARER/", 410, 118, 140, 30, 90, line=5),
+        box("RUPEES", 20, 220, 100, 28, line=6),
+        box("One Lakh Twenty Five Thousand", 150, 215, 430, 38, 93, line=7),
+        box("125000", 730, 220, 160, 34, 96, line=8),
+        box("30913550021101242616031", 100, 520, 500, 20, 97, line=9),
+    ]
+    ocr = OCRRawResult("PaddleOCR", "fake", "", words, 94, 1200, 560, status="COMPLETED")
+    result = extract_cheque_data("CHK-SPATIAL", ocr, np.full((560, 1200, 3), 255, dtype=np.uint8))
+
+    assert result.fields["date"].value == "2016-01-25"
+    assert result.fields["date"].confidence == pytest.approx(94)
+    assert result.fields["payee_name"].value == "Mira Traders"
+    assert result.fields["payee_name"].confidence == pytest.approx(91)
+    assert result.fields["amount"].value == 125000
+    assert result.fields["amount"].confidence == pytest.approx(96)
+    assert result.fields["amount_in_words"].value == "One Lakh Twenty Five Thousand"
+    assert result.validation_results["amount_consistency"]["status"] == "PASS"
+    assert result.fields["micr"].value == "30913550021101242616031"
+    assert result.fields["cheque_number"].value == "309135"
+
+
+def test_unparseable_amount_words_remain_available_but_are_marked_uncertain():
+    from app.services.ocr.engine import WordBox
+    words = [
+        WordBox("RUPEES", 10, 100, 80, 20, 98, 1, 1, 1, 1),
+        WordBox("One Lalch Twenty Five Thousand", 120, 95, 350, 30, 98, 1, 1, 1, 2),
+        WordBox("125000", 600, 100, 120, 30, 99, 1, 1, 1, 3),
+    ]
+    ocr = OCRRawResult("PaddleOCR", "fake", "", words, 98, 800, 500, status="COMPLETED")
+    result = extract_cheque_data("CHK-UNCERTAIN-WORDS", ocr, np.full((500, 800, 3), 255, dtype=np.uint8))
+    amount_words = result.fields["amount_in_words"].as_dict()
+    assert amount_words["value"] == "One Lalch Twenty Five Thousand"
+    assert amount_words["reliability"] == "UNCERTAIN"
+    assert result.validation_results["amount_consistency"]["status"] == "UNCERTAIN"
 
 
 def test_handwritten_axis_sample_runs_through_ocr_and_fraud_pipeline_when_available():

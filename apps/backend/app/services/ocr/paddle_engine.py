@@ -32,7 +32,10 @@ class PaddleOCREngine:
         if self._ocr is None:
             try:
                 from paddleocr import PaddleOCR
-                self._ocr = PaddleOCR(lang="en")
+                # PaddlePaddle 3.3.x's CPU oneDNN/PIR path can raise
+                # ConvertPirAttribute2RuntimeAttribute on OCR inference.
+                # PaddleOCR forwards this runtime option to PaddleX.
+                self._ocr = PaddleOCR(lang="en", enable_mkldnn=False)
             except Exception as exc:
                 raise OCREngineUnavailableError(f"PaddleOCR could not be initialized: {exc}") from exc
         return self._ocr

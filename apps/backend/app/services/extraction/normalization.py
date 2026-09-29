@@ -28,7 +28,8 @@ _NUMERIC_RUN_RE = re.compile(r"[\d,.]+")
 _DATE_FORMATS = ("%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%Y-%m-%d", "%Y/%m/%d",
                  "%m/%d/%Y", "%m-%d-%Y", "%d/%m/%y", "%d-%m-%y", "%d.%m.%y",
                  "%m/%d/%y", "%m-%d-%y", "%d-%b-%Y", "%d-%B-%Y", "%d %b %Y",
-                 "%d %B %Y", "%b %d %Y", "%B %d %Y", "%b %d, %Y", "%B %d, %Y")
+                 "%d %B %Y", "%b %d %Y", "%B %d %Y", "%b %d, %Y", "%B %d, %Y",
+                 "%d%m%Y", "%Y%m%d")
 
 
 def normalize_amount(raw_text: str | None) -> float | None:
@@ -75,7 +76,8 @@ def normalize_date(raw_text: str | None) -> str | None:
     if not raw_text:
         return None
     match = _DATE_PATTERN_RE.search(raw_text)
-    candidate = match.group(0) if match else raw_text.strip()
+    compact = re.search(r"(?<!\d)\d{8}(?!\d)", raw_text)
+    candidate = match.group(0) if match else (compact.group(0) if compact else raw_text.strip())
     for fmt in _DATE_FORMATS:
         try:
             parsed = datetime.strptime(candidate, fmt)
