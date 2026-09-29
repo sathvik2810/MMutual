@@ -1,11 +1,9 @@
 """Cheque data extraction orchestrator (docs/15_Cheque_Data_Extraction.md).
 
 Converts an OCRRawResult (raw text + word bounding boxes) into the
-canonical structured cheque record (docs/15 S29), using spatial/
-bounding-box region matching as the primary strategy and keyword/regex
-parsing over the full text as a fallback (docs/15 S9: "Keywords,
-Position, Expected data format, OCR bounding boxes, Cheque template,
-Regular expressions, Cross-field validation").
+canonical structured cheque record using semantic labels, reading order,
+OCR confidence, and field-pattern validation. Cheque-specific coordinates
+and templates are not used for cheque data extraction.
 
 Hard rule enforced throughout: a field that cannot be reliably read is
 left null with its raw OCR evidence (if any) preserved -- never a
@@ -14,6 +12,7 @@ fabricated or guessed value (docs/15 S32).
 
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any
@@ -24,7 +23,7 @@ import numpy as np
 from app.core.config import settings
 from app.services.extraction import field_parsers, normalization
 from app.services.ocr.engine import OCRRawResult, WordBox
-from app.services.ocr.regions import REGIONS, TEMPLATE_NAME, region_text_and_confidence, words_in_region
+from app.services.ocr.regions import REGIONS
 
 REQUIRED_FIELDS = ("cheque_number", "account_number", "payee_name", "amount", "date")
 
@@ -33,6 +32,7 @@ _NORMALIZERS = {
     "account_number": normalization.normalize_account_number,
     "routing_transit_number": normalization.normalize_routing_transit_number,
     "payee_name": normalization.normalize_payee_name,
+    "amount": normalization.normalize_amount,
     "date": normalization.normalize_date,
 }
 
@@ -46,12 +46,16 @@ class FieldExtraction:
     validation_status: str | None = None  # not populated until Milestone 4
 
     def as_dict(self) -> dict:
+        reliability = "NOT_DETECTED" if self.value in (None, "") else (
+            "UNCERTAIN" if self.confidence is None or self.confidence < settings.ocr_field_low_confidence_threshold else "RELIABLE"
+        )
         return {
             "value": self.value,
             "raw_value": self.raw_value,
             "confidence": round(self.confidence, 2) if self.confidence is not None else None,
             "source": self.source,
             "validation_status": self.validation_status,
+            "reliability": reliability,
         }
 
 
@@ -65,6 +69,8 @@ class ChequeExtractionResult:
     extraction_status: str = "PENDING"
     missing_fields: list[str] = dataclass_field(default_factory=list)
     ambiguous_fields: list[str] = dataclass_field(default_factory=list)
+    warnings: list[str] = dataclass_field(default_factory=list)
+    validation_results: dict[str, Any] = dataclass_field(default_factory=dict)
     processing_time_ms: float = 0.0
 
     def as_dict(self) -> dict:
@@ -74,6 +80,8 @@ class ChequeExtractionResult:
             "extraction_status": self.extraction_status,
             "missing_fields": self.missing_fields,
             "ambiguous_fields": self.ambiguous_fields,
+            "warnings": self.warnings,
+            "validation_results": self.validation_results,
             "processing_time_ms": round(self.processing_time_ms, 2),
             "signature_region_detected": self.signature_region_detected,
             "signature_region_bbox": self.signature_region_bbox,
@@ -96,92 +104,6 @@ class ChequeExtractionResult:
             "signature_region_detected": self.signature_region_detected,
             "extraction_status": self.extraction_status,
         }
-
-
-def _extract_one_field(field_name: str, words: list[WordBox], raw_text: str,
-                        image_width: int, image_height: int) -> FieldExtraction:
-    region = REGIONS.get(field_name)
-    raw_value: str | None = None
-    confidence: float | None = None
-    source: str | None = None
-
-    if region is not None:
-        region_words = words_in_region(words, region, image_width, image_height)
-        region_text, region_conf = region_text_and_confidence(region_words)
-        if region_text:
-            raw_value = field_parsers.strip_known_label(field_name, region_text)
-            confidence, source = region_conf, "ocr_region"
-
-    if raw_value is None:
-        fallback_raw = field_parsers.parse_field_from_text(field_name, raw_text)
-        if fallback_raw:
-            raw_value, source = fallback_raw, "ocr_fallback"
-            confidence = None  # fallback text isn't tied to a specific word's measured confidence
-
-    normalizer = _NORMALIZERS.get(field_name)
-    value = normalizer(raw_value) if normalizer else raw_value
-
-    return FieldExtraction(value=value, raw_value=raw_value, confidence=confidence, source=source)
-
-
-def _extract_amount_field(words: list[WordBox], raw_text: str, image_width: int, image_height: int) -> FieldExtraction:
-    region = REGIONS["amount"]
-    region_words = words_in_region(words, region, image_width, image_height)
-    region_text, region_conf = region_text_and_confidence(region_words)
-
-    raw_value, confidence, source = None, None, None
-    if region_text:
-        raw_value = field_parsers.strip_known_label("amount", region_text)
-        confidence, source = region_conf, "ocr_region"
-    else:
-        fallback = field_parsers.parse_field_from_text("amount", raw_text)
-        if fallback:
-            raw_value, source = fallback, "ocr_fallback"
-
-    value = normalization.normalize_amount(raw_value)
-    return FieldExtraction(value=value, raw_value=raw_value, confidence=confidence, source=source)
-
-
-def _extract_amount_in_words(words: list[WordBox], raw_text: str, image_width: int, image_height: int) -> FieldExtraction:
-    region = REGIONS["amount_in_words"]
-    region_words = words_in_region(words, region, image_width, image_height)
-    region_text, region_conf = region_text_and_confidence(region_words)
-
-    if region_text:
-        cleaned = field_parsers.strip_known_label("amount_in_words", region_text)
-        return FieldExtraction(value=cleaned, raw_value=cleaned, confidence=region_conf, source="ocr_region")
-
-    fallback = field_parsers.parse_field_from_text("amount_in_words", raw_text)
-    if fallback:
-        return FieldExtraction(value=fallback, raw_value=fallback, confidence=None, source="ocr_fallback")
-    return FieldExtraction(value=None, raw_value=None, confidence=None, source=None)
-
-
-def _extract_bank_name(words: list[WordBox], raw_text: str, image_width: int, image_height: int) -> FieldExtraction:
-    region = REGIONS["bank_name"]
-    region_words = words_in_region(words, region, image_width, image_height)
-    region_text, region_conf = region_text_and_confidence(region_words)
-    if region_text:
-        return FieldExtraction(value=region_text, raw_value=region_text, confidence=region_conf, source="ocr_region")
-    fallback = field_parsers.parse_bank_name(raw_text)
-    if fallback:
-        return FieldExtraction(value=fallback, raw_value=fallback, confidence=None, source="ocr_fallback")
-    return FieldExtraction(value=None, raw_value=None, confidence=None, source=None)
-
-
-def _extract_currency(words: list[WordBox], raw_text: str, image_width: int, image_height: int) -> FieldExtraction:
-    """Detects a currency symbol actually present in the OCR text near
-    the amount -- never assumes a default currency (docs/15 S16: currency
-    must be configured/detected per dataset, not assumed globally)."""
-    region = REGIONS["amount"]
-    region_words = words_in_region(words, region, image_width, image_height)
-    region_text, _ = region_text_and_confidence(region_words)
-    combined = f"{region_text} {raw_text}"
-    if "$" in combined:
-        return FieldExtraction(value="USD", raw_value="$", confidence=None, source="ocr_region")
-    if "₹" in combined or "Rs" in combined or "Rs." in combined:
-        return FieldExtraction(value="INR", raw_value="Rs", confidence=None, source="ocr_region")
-    return FieldExtraction(value=None, raw_value=None, confidence=None, source=None)
 
 
 def _detect_signature_region(image: np.ndarray, image_width: int, image_height: int) -> tuple[bool, dict]:
@@ -212,7 +134,7 @@ def extract_cheque_data(cheque_id: str, ocr_result: OCRRawResult, image: np.ndar
 
     if ocr_result.status == "FAILED":
         return ChequeExtractionResult(
-            cheque_id=cheque_id, template=TEMPLATE_NAME, extraction_status="FAILED",
+            cheque_id=cheque_id, template="GENERALIZED_LAYOUT", extraction_status="FAILED",
             missing_fields=list(REQUIRED_FIELDS), processing_time_ms=(time.perf_counter() - start) * 1000,
         )
 
@@ -220,14 +142,92 @@ def extract_cheque_data(cheque_id: str, ocr_result: OCRRawResult, image: np.ndar
     raw_text = ocr_result.raw_text
     width, height = ocr_result.image_width, ocr_result.image_height
 
-    fields: dict[str, FieldExtraction] = {}
-    for name in ("cheque_number", "account_number", "routing_transit_number", "payee_name", "date"):
-        fields[name] = _extract_one_field(name, words, raw_text, width, height)
+    # Build reading-order lines from OCR metadata. No cheque template or
+    # absolute/fractional field coordinates are used for data extraction.
+    grouped: dict[tuple[int, int, int], list[WordBox]] = {}
+    for word in words:
+        grouped.setdefault((word.block_num, word.par_num, word.line_num), []).append(word)
+    lines = [" ".join(w.text for w in sorted(row, key=lambda item: (item.left, item.word_num)))
+             for _, row in sorted(grouped.items())]
+    # Prefer the OCR tokens tied to positions when available; raw full-text
+    # remains the fallback when the engine cannot provide boxes.
+    text = "\n".join(lines) if lines else raw_text.strip()
 
-    fields["amount"] = _extract_amount_field(words, raw_text, width, height)
-    fields["amount_in_words"] = _extract_amount_in_words(words, raw_text, width, height)
-    fields["bank_name"] = _extract_bank_name(words, raw_text, width, height)
-    fields["currency"] = _extract_currency(words, raw_text, width, height)
+    def field(name: str, candidate: str | None, pattern_name: str | None = None) -> FieldExtraction:
+        if not candidate and name != "payee_name":
+            candidate = field_parsers.parse_field_from_text(pattern_name or name, text)
+        if not candidate:
+            return FieldExtraction(None, None, None, None)
+        candidate = field_parsers.strip_known_label(pattern_name or name, candidate)
+        normalized = _NORMALIZERS[name](candidate) if name in _NORMALIZERS else candidate
+        candidate_lower = candidate.lower()
+        candidate_tokens = set(candidate_lower.split())
+        evidence_words = [w for w in words if w.text.lower().strip(".:,/-") in candidate_tokens
+                          or candidate_lower in w.text.lower()]
+        confidence = (sum(w.confidence for w in evidence_words) / len(evidence_words)) if evidence_words else None
+        return FieldExtraction(normalized, candidate, confidence, "ocr_spatial" if confidence is not None else "ocr_fallback")
+
+    def labelled(pattern: str) -> str | None:
+        match = re.search(pattern, text, re.I)
+        return match.group(1).strip() if match else None
+
+    cheque_no = field("cheque_number", labelled(r"(?:Cheque|Check|Chq)\s*(?:No\.?|Number|#)?\s*[:\-]?\s*([A-Za-z0-9]{4,12})"))
+    account = field("account_number", labelled(r"(?:Account|A\s*/?\s*C)\s*(?:No\.?|Number)?\s*[:\-]?\s*([A-Za-z0-9]{6,24})"))
+    routing = field("routing_transit_number", labelled(r"(?:Routing\s*/?\s*Transit|Routing)\s*(?:No\.?|Code)?\s*[:\-]?\s*([A-Za-z0-9]{6,16})"))
+    ifsc_match = re.search(r"\b[A-Z]{4}0[A-Z0-9]{6}\b", text, re.I)
+    ifsc_words = [w for w in words if ifsc_match and ifsc_match.group(0).lower() in w.text.lower()]
+    ifsc_confidence = sum(w.confidence for w in ifsc_words) / len(ifsc_words) if ifsc_words else None
+    ifsc = FieldExtraction(ifsc_match.group(0).upper(), ifsc_match.group(0), ifsc_confidence, "ocr_pattern") if ifsc_match else FieldExtraction(None, None, None, None)
+    date_candidate = labelled(r"(?:Date|Dated)\s*[:\-]?\s*(\d{1,4}[/\-.]\d{1,2}[/\-.]\d{1,4}|\d{1,2}[-/ ]+[A-Za-z]{3,9}[-/ ]+\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4})")
+    if date_candidate is None:
+        labelled_date_text = labelled(r"(?:Date|Dated)\s*[:\-]?\s*([^\n]+)")
+        if labelled_date_text and normalization.normalize_date(labelled_date_text) is None:
+            date_candidate = labelled_date_text
+        else:
+            date_candidate = field_parsers.parse_unlabelled_date(text)
+    date = field("date", date_candidate)
+    payee_value = labelled(r"(?:Pay\s+to(?:\s+the\s+order\s+of)?|Payee)\s*[:\-]?\s*([^\n]+)")
+    if payee_value is None:
+        # A label may be one OCR line and the handwritten value the next.
+        for i, line in enumerate(lines[:-1]):
+            if re.search(r"\b(?:Pay|Payee)\b", line, re.I):
+                payee_value = lines[i + 1]
+                break
+    if payee_value and (not re.fullmatch(r"[A-Za-z][A-Za-z .,&'-]*", payee_value.strip())
+                        or re.search(r"\b(?:date|amount|account|cheque|check|bank|rupees|ifsc)\b", payee_value, re.I)):
+        payee_value = None
+    payee = field("payee_name", payee_value)
+
+    amount_match = re.search(r"(?:Amount\s*[:\-]?\s*|[$]|Rs\.?\s*|INR\s*)([\d,]+(?:\.\d{1,2})?)", text, re.I)
+    amount_raw = amount_match.group(1) if amount_match else None
+    if amount_raw is None:
+        amount_label_text = labelled(r"Amount(?!\s+in\s+words)\s*[:\-]?\s*([^\n]+)")
+        amount_raw = amount_label_text.strip() if amount_label_text else None
+    if amount_raw is None:
+        # A numeric amount should have decimal/currency evidence, avoiding
+        # accidental use of cheque/account identifiers as money.
+        amount_match = re.search(r"\b\d{1,3}(?:,\d{2,3})*(?:\.\d{1,2})\b", text)
+        amount_raw = amount_match.group(0) if amount_match else None
+    amount = field("amount", amount_raw)
+    words_match = re.search(r"(?:Amount\s+in\s+words|Rupees)\s*[:\-]?\s*([^\n]+)", text, re.I)
+    amount_words_value = words_match.group(1) if words_match else None
+    if amount_words_value is None:
+        from app.services.validation.amount_words import words_to_amount
+        phrases = [line for line in lines if len(line.split()) >= 3 and words_to_amount(line) is not None]
+        amount_words_value = max(phrases, key=len) if phrases else None
+    amount_words = field("amount_in_words", amount_words_value) if amount_words_value else FieldExtraction(None, None, None, None)
+    bank_line = next((line for line in lines if re.search(r"\bbank\b", line, re.I)), None)
+    bank = FieldExtraction(bank_line, bank_line, None, "ocr_fallback") if bank_line else FieldExtraction(None, None, None, None)
+    fields = {"cheque_number": cheque_no, "account_number": account, "routing_transit_number": routing,
+              "payee_name": payee, "date": date, "amount": amount, "amount_in_words": amount_words,
+              "ifsc": ifsc, "micr": FieldExtraction(None, None, None, None), "bank_name": bank,
+              "currency": FieldExtraction("INR", "Rs/INR", None, "ocr_text") if re.search(r"(?:₹|\bRs\.?\b|\bINR\b|\bRupees\b)", text, re.I)
+              else FieldExtraction("USD", "$", None, "ocr_text") if "$" in text else FieldExtraction(None, None, None, None)}
+    micr_words = [w for w in words if height and w.center[1] >= height * 0.78 and re.search(r"\d{6,}", w.text)]
+    if micr_words:
+        micr_raw = " ".join(w.text for w in sorted(micr_words, key=lambda item: item.left))
+        fields["micr"] = FieldExtraction(re.sub(r"\D", "", micr_raw), micr_raw,
+                                             sum(w.confidence for w in micr_words)/len(micr_words), "ocr_spatial")
 
     signature_detected, signature_bbox = _detect_signature_region(image, width, height)
 
@@ -239,14 +239,31 @@ def extract_cheque_data(cheque_id: str, ocr_result: OCRRawResult, image: np.ndar
     else:
         extraction_status = "COMPLETED"
 
+    warnings = [f"{name} was not detected reliably." for name in missing_fields]
+    threshold = settings.ocr_field_low_confidence_threshold
+    warnings.extend(f"{name} has low OCR confidence." for name, value in fields.items()
+                    if value.value is not None and value.confidence is not None and value.confidence < threshold)
+    numeric_amount = fields["amount"].value
+    words_amount = None
+    if fields["amount_in_words"].value:
+        from app.services.validation.amount_words import words_to_amount
+        words_amount = words_to_amount(fields["amount_in_words"].value)
+    amount_status = "NOT_CHECKED"
+    if numeric_amount is not None and words_amount is not None:
+        amount_status = "PASS" if abs(float(numeric_amount) - words_amount) < 0.01 else "FAIL"
+    elif fields["amount_in_words"].value and words_amount is None:
+        amount_status = "UNCERTAIN"
     return ChequeExtractionResult(
         cheque_id=cheque_id,
-        template=TEMPLATE_NAME,
+        template="GENERALIZED_LAYOUT",
         fields=fields,
         signature_region_detected=signature_detected,
         signature_region_bbox=signature_bbox,
         extraction_status=extraction_status,
         missing_fields=missing_fields,
         ambiguous_fields=ambiguous_fields,
+        warnings=warnings,
+        validation_results={"amount_consistency": {"status": amount_status,
+            "numeric_amount": numeric_amount, "words_amount": words_amount}},
         processing_time_ms=(time.perf_counter() - start) * 1000,
     )

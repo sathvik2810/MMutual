@@ -6,9 +6,9 @@ which compiles real dialect-specific DDL text without connecting to any
 database).
 
 Live CRUD/constraint-enforcement/transaction tests against a real
-PostgreSQL server could NOT be run in this environment -- no
-PostgreSQL server, client, or Docker was available (verified directly:
-no `psql`/`pg_ctl`/`postgres` binary and no `docker` command on PATH).
+PostgreSQL server could NOT be run in this environment -- no live server
+is reachable. Installed client/container tools do not establish server
+availability; this is verified by the application's connection check.
 This is explicitly reported here and in the Milestone 8 completion
 report, per that milestone's own fallback instruction, rather than
 silently substituting SQLite or claiming untested behavior works.
@@ -154,8 +154,6 @@ def test_alembic_downgrade_offline_generates_complete_sql():
 def test_no_live_postgresql_available_in_this_environment():
     """Documents, rather than hides, the real environment limitation
     this milestone's tests operate under."""
-    import shutil
+    from app.core.database import check_database_connection
 
-    assert shutil.which("psql") is None
-    assert shutil.which("pg_ctl") is None
-    assert shutil.which("docker") is None
+    assert check_database_connection() is False

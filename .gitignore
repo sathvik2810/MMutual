@@ -42,6 +42,9 @@ logs/
 # even though in this project it only ever contains synthetic test data.
 data/runtime/
 
+# Handwritten cheque samples may contain personal financial information.
+data/IDRBT/
+
 # Models (large binary files)
 *.pkl
 *.h5

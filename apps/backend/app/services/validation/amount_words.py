@@ -28,7 +28,9 @@ _TENS = {
     "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50, "sixty": 60,
     "seventy": 70, "eighty": 80, "ninety": 90,
 }
-_SCALES = {"hundred": 100, "thousand": 1_000, "million": 1_000_000}
+_SCALES = {"hundred": 100, "thousand": 1_000, "lakh": 100_000, "lakhs": 100_000,
+           "lac": 100_000, "lacs": 100_000, "lack": 100_000, "lacks": 100_000,
+           "crore": 10_000_000, "crores": 10_000_000, "million": 1_000_000}
 _IGNORED_WORDS = {"only", "and", "rupees", "dollars", "rs"}
 _CENTS_FRACTION_RE = re.compile(r"(\d{1,2})\s*/\s*100")
 
@@ -61,7 +63,7 @@ def words_to_amount(text: str | None) -> float | None:
         elif word == "hundred":
             current = (current or 1) * 100
             recognized_any = True
-        elif word in ("thousand", "million"):
+        elif word in ("thousand", "million", "lakh", "lakhs", "lac", "lacs", "lack", "lacks", "crore", "crores"):
             total += (current or 1) * _SCALES[word]
             current = 0
             recognized_any = True

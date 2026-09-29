@@ -18,7 +18,7 @@ describe("UploadPage", () => {
     const input = document.querySelector('input[type="file"]');
     fireEvent.change(input, { target: { files: [makeFile("cheque.gif", "image/gif")] } });
 
-    expect(screen.getByTestId("upload-validation-error")).toHaveTextContent("Only JPEG, PNG and PDF");
+    expect(screen.getByTestId("upload-validation-error")).toHaveTextContent("Only JPEG, PNG, TIFF and PDF");
     expect(uploadChequeMock).not.toHaveBeenCalled();
   });
 

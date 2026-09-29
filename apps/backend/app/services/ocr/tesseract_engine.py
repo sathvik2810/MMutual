@@ -128,11 +128,15 @@ class TesseractOCREngine:
 _engine_instance: TesseractOCREngine | None = None
 
 
-def get_ocr_engine() -> TesseractOCREngine:
-    """Single place that decides which OCREngine implementation is active
-    (ADR-0002). Swapping providers later means changing only this
-    function's return value."""
+def get_tesseract_engine() -> TesseractOCREngine:
+    """Return the Tesseract fallback adapter."""
     global _engine_instance
     if _engine_instance is None:
         _engine_instance = TesseractOCREngine()
     return _engine_instance
+
+
+def get_ocr_engine():
+    """Return the configured primary engine (PaddleOCR)."""
+    from app.services.ocr.paddle_engine import get_paddle_engine
+    return get_paddle_engine()

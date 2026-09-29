@@ -28,11 +28,14 @@ from app.services.cheque.exceptions import (
 _JPEG_SIGNATURES = (b"\xff\xd8\xff",)
 _PNG_SIGNATURES = (b"\x89PNG\r\n\x1a\n",)
 _PDF_SIGNATURES = (b"%PDF-",)
+_TIFF_SIGNATURES = (b"II*\x00", b"MM\x00*", b"II+\x00", b"MM\x00+")
 
 _EXTENSION_TO_MEDIA_TYPE = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".png": "image/png",
+    ".tif": "image/tiff",
+    ".tiff": "image/tiff",
     ".pdf": "application/pdf",
 }
 
@@ -88,6 +91,8 @@ def validate_content_matches_extension(content: bytes, extension: str) -> None:
         ok = _matches_signature(content, _PNG_SIGNATURES)
     elif extension == ".pdf":
         ok = _matches_signature(content, _PDF_SIGNATURES)
+    elif extension in (".tif", ".tiff"):
+        ok = _matches_signature(content, _TIFF_SIGNATURES)
     else:  # pragma: no cover - unreachable, validate_extension runs first
         ok = False
     if not ok:

@@ -29,8 +29,7 @@ def _word(text, left, top, width=40, height=15, conf=90.0, block=1, par=1, line=
 
 
 def _complete_words() -> list[WordBox]:
-    """One WordBox placed inside each field's region, matching the real
-    Milestone 1 template layout (app/services/ocr/regions.py)."""
+    """Labeled OCR lines placed at arbitrary locations on the image."""
     return [
         _word("DEMO", 30, 30, line=1, word=1),
         _word("Date:", 900, 35, line=2, word=1),
@@ -38,8 +37,13 @@ def _complete_words() -> list[WordBox]:
         _word("Cheque", 900, 65, line=3, word=1),
         _word("No:", 960, 65, line=3, word=2),
         _word("002020", 990, 65, line=3, word=3),
-        _word("Bluepeak", 30, 150, line=4, word=1),
-        _word("Distributors", 130, 150, line=4, word=2),
+        _word("Pay", 10, 150, line=4, word=1),
+        _word("to", 60, 150, line=4, word=2),
+        _word("the", 85, 150, line=4, word=3),
+        _word("order", 115, 150, line=4, word=4),
+        _word("of:", 160, 150, line=4, word=5),
+        _word("Bluepeak", 195, 150, line=4, word=6),
+        _word("Distributors", 295, 150, line=4, word=7),
         _word("$17,334.23", 30, 260, width=100, line=5, word=1),
         _word("Seventeen", 30, 330, line=6, word=1),
         _word("Thousand", 120, 330, line=6, word=2),
@@ -144,15 +148,17 @@ class TestNoFabricationBehavior:
 
 class TestFieldConfidenceHandling:
     def test_region_based_field_reports_measured_confidence(self):
-        words = [_word("Bluepeak", 30, 150, conf=42.5, line=1, word=1),
-                 _word("Distributors", 130, 150, conf=88.0, line=1, word=2)]
+        words = [_word("Pay", 10, 150, line=1, word=1), _word("to", 60, 150, line=1, word=2),
+                 _word("Bluepeak", 100, 150, conf=42.5, line=1, word=3),
+                 _word("Distributors", 200, 150, conf=88.0, line=1, word=4)]
         ocr = _ocr_result(words)
         result = extract_cheque_data("CHK-TEST-010", ocr, _blank_image())
         payee = result.fields["payee_name"]
         assert payee.confidence == pytest.approx((42.5 + 88.0) / 2)
 
     def test_low_confidence_value_is_not_hidden_or_rounded_away(self):
-        words = [_word("Bluepeak", 30, 150, conf=5.0, line=1, word=1)]
+        words = [_word("Pay", 10, 150, line=1, word=1), _word("to", 50, 150, line=1, word=2),
+                 _word("Bluepeak", 80, 150, conf=5.0, line=1, word=3)]
         ocr = _ocr_result(words)
         result = extract_cheque_data("CHK-TEST-011", ocr, _blank_image())
         assert result.fields["payee_name"].confidence == pytest.approx(5.0)
@@ -183,7 +189,7 @@ class TestFallbackKeywordExtraction:
         ocr = _ocr_result(words, raw_text="Cheque No: 111111")
         result = extract_cheque_data("CHK-TEST-014", ocr, _blank_image())
         assert result.fields["cheque_number"].value == "999999"
-        assert result.fields["cheque_number"].source == "ocr_region"
+        assert result.fields["cheque_number"].source == "ocr_spatial"
 
 
 class TestSignatureRegionDetection:

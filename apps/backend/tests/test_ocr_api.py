@@ -82,8 +82,10 @@ class TestOCRResultEndpoint:
         assert resp.status_code == 200
         body = resp.json()
         assert body["cheque_id"] == cheque_id
-        assert body["engine"] == "Tesseract"
+        assert body["engine"] in {"PaddleOCR", "Tesseract"}
         assert "extracted_data" in body
+        assert body["engine"] in {"PaddleOCR", "Tesseract"}
+        assert "words" in body and "extraction_warnings" in body and "validation_results" in body
         assert set(body["extracted_data"].keys()) >= {
             "cheque_number", "account_number", "routing_transit_number",
             "payee_name", "amount", "amount_in_words", "date", "bank_name", "currency",

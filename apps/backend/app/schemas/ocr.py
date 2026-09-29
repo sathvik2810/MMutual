@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class OCRStartResponse(BaseModel):
@@ -11,10 +11,16 @@ class OCRStartResponse(BaseModel):
     cheque_id: str
     status: str
     ocr_confidence: float
+    engine: str
 
 
 class ExtractedFieldResponse(BaseModel):
-    """docs/15_Cheque_Data_Extraction.md S30 field-level metadata."""
+    """docs/15_Cheque_Data_Extraction.md S30 field-level metadata.
+
+    The API surface is intentionally limited to these five documented
+    keys; per-field reliability is derived internally from ``confidence``
+    and is not part of the serialized contract.
+    """
 
     value: Any
     raw_value: str | None
@@ -43,5 +49,10 @@ class OCRResultResponse(BaseModel):
     signature_region_detected: bool
     signature_region_bbox: dict[str, int] | None
     extracted_data: dict[str, ExtractedFieldResponse]
+    words: list[dict[str, Any]] = Field(default_factory=list)
+    image_width: int = 0
+    image_height: int = 0
+    extraction_warnings: list[str] = Field(default_factory=list)
+    validation_results: dict[str, Any] = Field(default_factory=dict)
     status: str  # "SUCCESS" | "FAILED" (docs/26 S12 example)
     error_message: str | None = None

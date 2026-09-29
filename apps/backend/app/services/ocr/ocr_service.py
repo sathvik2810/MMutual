@@ -15,8 +15,7 @@ import time
 from dataclasses import dataclass
 
 from app.services.ocr.engine import OCREngine, OCRRawResult
-from app.services.ocr.exceptions import OCREngineUnavailableError
-from app.services.ocr.tesseract_engine import get_ocr_engine
+from app.services.ocr.tesseract_engine import get_ocr_engine, get_tesseract_engine
 from app.services.preprocessing.preprocessing_service import load_image_bgr
 
 
@@ -48,21 +47,39 @@ def run_ocr_for_cheque(
         )
         return OCRRunOutcome(result=failed, attempts=0, total_processing_time_ms=elapsed_ms)
 
+    errors: list[str] = []
+    result = None
+    attempts += 1
     try:
         result = engine.run(processed_image)
-        attempts += 1
-    except OCREngineUnavailableError as exc:
-        elapsed_ms = (time.perf_counter() - start) * 1000
-        failed = OCRRawResult(
-            engine_name=engine.name, engine_version="unavailable", raw_text="",
-            status="FAILED", error_message=str(exc), processing_time_ms=elapsed_ms,
-        )
-        return OCRRunOutcome(result=failed, attempts=attempts, total_processing_time_ms=elapsed_ms)
+        if result.status in ("FAILED", "PARTIAL", "LOW_CONFIDENCE") or not result.raw_text.strip() or len(result.words) < 2:
+            errors.append(result.error_message or "Primary OCR output was empty or insufficient.")
+            result = None
+    except Exception as exc:  # Paddle can fail during import, model loading, or inference.
+        errors.append(str(exc))
 
-    if result.status == "LOW_CONFIDENCE":
+    if result is None and engine.name != "Tesseract":
+        fallback = get_tesseract_engine()
+        try:
+            attempts += 1
+            result = fallback.run(processed_image)
+            if errors:
+                result.error_message = "Primary OCR fallback: " + "; ".join(errors)
+        except Exception as exc:
+            errors.append(str(exc))
+    elif result is None:
+        # A caller may explicitly inject Tesseract for isolated adapter use.
+        result = OCRRawResult(engine.name, engine.version, "", status="FAILED", error_message="; ".join(errors))
+
+    if result is None:
+        fallback = get_tesseract_engine()
+        result = OCRRawResult(fallback.name, "unavailable", "", status="FAILED",
+                              error_message="; ".join(errors) or "Both OCR engines failed.")
+
+    if result.engine_name == "Tesseract" and result.status == "LOW_CONFIDENCE":
         try:
             original_image = load_image_bgr(original_image_path)
-            retry_result = engine.run(original_image)
+            retry_result = get_tesseract_engine().run(original_image)
             attempts += 1
             if retry_result.average_confidence > result.average_confidence:
                 result = retry_result

@@ -87,7 +87,7 @@ class Settings(BaseSettings):
     # docs/12_Cheque_Input_Module.md S6 -- all are explicitly documented as
     # "example prototype rules" to be calibrated later, not fixed banking
     # standards.
-    allowed_upload_extensions: list[str] = [".jpg", ".jpeg", ".png", ".pdf"]
+    allowed_upload_extensions: list[str] = [".jpg", ".jpeg", ".png", ".pdf", ".tif", ".tiff"]
 
     # Below this size an image is treated as unreadable/invalid (hard
     # rejection). Below the "soft" size the image is accepted but flagged
@@ -131,10 +131,9 @@ class Settings(BaseSettings):
     max_upscale_factor: float = 2.5
 
     # --- Milestone 3: OCR & Cheque Data Extraction ---------------------
-    # Per ADR-0002, Tesseract via PyTesseract, invoked only through the
-    # OCR adapter interface (app/services/ocr/engine.py). The binary path
-    # is configurable since Tesseract is a native executable, not a pure
-    # Python package -- pytesseract only calls out to it.
+    # PaddleOCR is the primary OCR adapter. Tesseract remains installed as
+    # a native executable and is called through PyTesseract when PaddleOCR
+    # fails or returns insufficient text. Its binary path is configurable.
     tesseract_cmd_path: str = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
     # Below this average confidence (Tesseract's own 0-100 scale) the OCR

@@ -1,74 +1,63 @@
-"""Keyword/regex fallback field parsing (docs/15_Cheque_Data_Extraction.md
-S9-S10).
-
-Used only when region-based extraction (app/services/ocr/regions.py)
-finds nothing for a field -- e.g. because the cheque was cropped
-unusually or a region fell just outside its expected bounding box. This
-mirrors docs/15's documented keyword table (Date -> "Date"/"Dated",
-Payee -> "Pay"/"Pay to"/"Payee", Amount -> "Amount"/"Rs"/"$",
-Account -> "Account"/"A/C"/"A/C No", Cheque Number ->
-"Cheque No"/"Check No"/"Chq No").
-
-Every pattern only ever *extracts* text that is already present in the
-OCR output -- it never invents a value.
-"""
-
+"""Semantic and pattern-based parsing of OCR text."""
 from __future__ import annotations
-
 import re
 
 _PATTERNS: dict[str, re.Pattern] = {
-    "date": re.compile(r"(?:Date|Dated)\s*[:\-]?\s*([0-9]{1,2}[/\-][0-9]{1,2}[/\-][0-9]{2,4})", re.IGNORECASE),
-    "cheque_number": re.compile(r"(?:Cheque|Check|Chq)\s*No\.?\s*[:\-]?\s*([A-Za-z0-9]+)", re.IGNORECASE),
-    "account_number": re.compile(r"Account\s*No\.?\s*[:\-]?\s*([A-Za-z0-9]+)", re.IGNORECASE),
-    "routing_transit_number": re.compile(
-        r"Routing\s*/?\s*Transit\s*No\.?\s*[:\-]?\s*([A-Za-z0-9]+)", re.IGNORECASE,
-    ),
-    "amount": re.compile(r"[$₹]\s*([\d,]+\.\d{2})"),
-    "amount_in_words": re.compile(
-        r"Amount\s*in\s*words\s*[:\-]?\s*\n?\s*(.+)", re.IGNORECASE,
-    ),
-    "payee_name": re.compile(
-        r"Pay\s*to\s*the\s*order\s*of\s*[:\-]?\s*\n?\s*(.+)", re.IGNORECASE,
-    ),
+    "date": re.compile(r"(?:Date|Dated)\s*[:\-]?\s*((?:[0-9]{1,4}[/\-.][0-9]{1,2}[/\-.][0-9]{1,4})|(?:[0-9]{1,2}[-/ ]+[A-Za-z]{3,9}[-/ ]+[0-9]{2,4})|(?:[A-Za-z]{3,9}\s+[0-9]{1,2},?\s+[0-9]{4}))", re.I),
+    "cheque_number": re.compile(r"(?:Cheque|Check|Chq)\s*(?:No\.?|Number|#)?\s*[:\-]?\s*([A-Za-z0-9]{4,12})", re.I),
+    "account_number": re.compile(r"(?:Account|A\s*/?\s*C)\s*(?:No\.?|Number)?\s*[:\-]?\s*([A-Za-z0-9]{6,24})", re.I),
+    "routing_transit_number": re.compile(r"(?:Routing\s*/?\s*Transit|Routing|IFSC)\s*(?:No\.?|Code)?\s*[:\-]?\s*([A-Za-z0-9]{6,16})", re.I),
+    "amount": re.compile(r"(?:[$]|Rs\.?|INR)?\s*([\d,]+(?:\.\d{1,2})?)(?:\s*/-)?", re.I),
+    "amount_in_words": re.compile(r"(?:Amount\s+in\s+words|Rupees)\s*[:\-]?\s*(.+)", re.I),
+    "payee_name": re.compile(r"(?:Pay\s+to(?:\s+the\s+order\s+of)?|Payee)\s*[:\-]?\s*(.+)", re.I),
 }
 
+_UNLABELLED_DATE = re.compile(
+    r"(?<!\d)(?:[0-9]{1,4}[/\-.][0-9]{1,2}[/\-.][0-9]{1,4}|"
+    r"[0-9]{1,2}[-/ ]+[A-Za-z]{3,9}[-/ ]+[0-9]{2,4}|"
+    r"[A-Za-z]{3,9}\s+[0-9]{1,2},?\s+[0-9]{4})(?!\d)",
+    re.I,
+)
 
 def parse_field_from_text(field_name: str, raw_text: str) -> str | None:
     pattern = _PATTERNS.get(field_name)
-    if pattern is None or not raw_text:
-        return None
-    match = pattern.search(raw_text)
+    match = pattern.search(raw_text) if pattern and raw_text else None
     if not match:
         return None
     value = match.group(1).strip()
+    if field_name in {"amount_in_words", "payee_name"}:
+        value = value.splitlines()[0].strip()
     return value or None
 
 
-def strip_known_label(field_name: str, text: str) -> str:
-    """If `text` still contains this field's label (e.g. a region crop
-    that includes both the printed label and the value, such as "Pay to
-    the order of: Bluepeak Distributors"), returns just the captured
-    value portion. If the label isn't present, returns `text` unchanged
-    -- this never removes anything from text that wasn't a recognized
-    label, so it cannot turn a real value into a guess."""
-    pattern = _PATTERNS.get(field_name)
-    if pattern is None or not text:
-        return text
-    match = pattern.search(text)
-    if match:
-        return match.group(1).strip()
-    return text
+def parse_unlabelled_date(raw_text: str) -> str | None:
+    """Return a date only when OCR text contains one unique valid candidate."""
+    from app.services.extraction.normalization import normalize_date
 
+    candidates = []
+    for match in _UNLABELLED_DATE.finditer(raw_text or ""):
+        candidate = match.group(0).strip()
+        normalized = normalize_date(candidate)
+        if normalized is not None:
+            candidates.append((candidate, normalized))
+    distinct_dates = {normalized for _, normalized in candidates}
+    if len(distinct_dates) != 1:
+        return None
+    return next(candidate for candidate, normalized in candidates if normalized in distinct_dates)
+
+def strip_known_label(field_name: str, text: str) -> str:
+    pattern = _PATTERNS.get(field_name)
+    match = pattern.match(text) if pattern and text else None
+    if not match:
+        return text
+    value = match.group(1).strip()
+    if field_name in {"amount_in_words", "payee_name"}:
+        value = value.splitlines()[0].strip()
+    return value
 
 def parse_bank_name(raw_text: str) -> str | None:
-    """The bank name is printed as the first non-empty line of the
-    cheque, with no distinguishing keyword -- handled as a special case
-    rather than forced into the generic keyword table."""
-    if not raw_text:
-        return None
-    for line in raw_text.splitlines():
-        stripped = line.strip()
-        if stripped:
-            return stripped
+    for line in (raw_text or "").splitlines():
+        line = line.strip()
+        if line:
+            return line
     return None

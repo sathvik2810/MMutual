@@ -11,7 +11,7 @@ SQLAlchemy==2.0.52
 alembic==1.19.1
 psycopg[binary]==3.3.4
 python-dotenv==1.2.3
-PyYAML==6.0.3
+PyYAML>=6.0.2  # relaxed from ==6.0.3: paddleocr 3.7.0 -> paddlex transitively pins PyYAML==6.0.2
 python-multipart==0.0.32
 pytest==9.1.1
 pytest-cov==7.1.0
@@ -22,7 +22,12 @@ httpx==0.28.1
 # exactly this purpose; Pillow renders the fictional/generic sample cheque
 # and signature images consumed by later milestones.
 pandas==3.0.5
-numpy==2.5.2
+# NOTE(vas): numpy 2.5.x is capped out by paddlex (a transitive dependency of
+# the pinned paddleocr 3.7.0) which requires numpy<2.4, while opencv-python-
+# headless requires numpy>=2. The installable overlap is [2.0, 2.4); relax the
+# pin to that range so the full stack resolves on Python 3.13. PaddleOCR and
+# Tesseract pins are left untouched.
+numpy>=2.0,<2.4
 Pillow==12.3.0
 
 # Milestone 2 (Cheque Upload & Image Processing): OpenCV is the documented
@@ -30,11 +35,20 @@ Pillow==12.3.0
 # instead of opencv-python since this runs in a server/backend context
 # with no GUI. PyMuPDF renders the first page of an uploaded PDF cheque
 # to an image (docs/12 S8) without requiring an external Poppler binary.
-opencv-python-headless==5.0.0.93
+# PaddleX OCR-core installs opencv-contrib-python==4.10.0.84, which shares
+# the cv2 import namespace. Keep both distributions on the same OpenCV
+# version so whichever wheel supplies cv2 has consistent behavior.
+opencv-python-headless==4.10.0.84
 pymupdf==1.28.2
 
-# Milestone 3 (OCR & Cheque Data Extraction): PyTesseract is the Python
-# wrapper for Tesseract OCR per ADR-0002. The native Tesseract binary
+# OCR engines: PaddleOCR is the primary engine (CPU inference); PyTesseract
+# and native Tesseract remain the automatic fallback. PaddleOCR downloads
+# its English detection and recognition models on first use.
+paddlepaddle==3.3.1
+paddleocr==3.7.0
+
+# PyTesseract is the Python wrapper for the native Tesseract OCR fallback.
+# The Tesseract binary
 # itself (v5.4.0, installed via `winget install UB-Mannheim.TesseractOCR`)
 # is a separate, non-pip system dependency -- see app/core/config.py's
 # tesseract_cmd_path setting and the Milestone 3 report for details.

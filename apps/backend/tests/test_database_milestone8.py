@@ -13,7 +13,6 @@ was available in this environment.
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import pandas as pd
@@ -40,8 +39,7 @@ REAL_BANKING_DATA_DIR = DATA_DIR / "mock_banking_data"
 _NO_LIVE_POSTGRES = not check_database_connection()
 _SKIP_REASON = (
     "No live PostgreSQL server is reachable in this environment "
-    "(no psql/pg_ctl/docker on PATH, no DATABASE_URL pointing at a "
-    "running server) -- this scenario can only be genuinely verified "
+    "(no DATABASE_URL points to a running server) -- this scenario can only be genuinely verified "
     "against a real PostgreSQL instance, and this project's own "
     "instructions forbid substituting SQLite to fake the result."
 )
@@ -72,8 +70,8 @@ _SAMPLES = _ground_truth()
 # ----------------------------------------------------------------------
 
 def test_no_live_postgresql_confirmed_unavailable_in_this_environment():
-    assert shutil.which("psql") is None
-    assert shutil.which("docker") is None
+    # Client/container executables may be installed without a running
+    # PostgreSQL server; availability is determined by connectivity.
     assert check_database_connection() is False
 
 

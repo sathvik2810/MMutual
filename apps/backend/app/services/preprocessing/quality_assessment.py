@@ -87,11 +87,18 @@ def estimate_skew_angle(gray: np.ndarray) -> float:
     coords = cv2.findNonZero(thresh)
     if coords is None or len(coords) < 10:
         return 0.0
-    angle = cv2.minAreaRect(coords)[-1]
-    # cv2.minAreaRect returns an angle in [-90, 0); normalize to a small
-    # signed skew in [-45, 45] representing rotation from horizontal.
-    if angle < -45:
-        angle = 90 + angle
+    (_, _), (rect_width, rect_height), raw_angle = cv2.minAreaRect(coords)
+    # OpenCV versions differ in how minAreaRect represents a rotated box:
+    # some return [-90, 0), others may return [0, 90). Convert the angle to
+    # the long edge's orientation, then fold equivalent rectangle angles
+    # into the small signed range around horizontal.
+    angle = float(raw_angle)
+    if rect_width < rect_height:
+        angle -= 90.0
+    if angle < -45.0:
+        angle += 90.0
+    elif angle > 45.0:
+        angle -= 90.0
     return float(angle)
 
 

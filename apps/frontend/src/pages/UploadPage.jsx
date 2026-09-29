@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { uploadCheque } from "../api/cheques.js";
 import { useNotifications } from "../layouts/NotificationContext.jsx";
 
-const ACCEPTED_TYPES = ["image/jpeg", "image/png", "application/pdf"];
+const ACCEPTED_TYPES = ["image/jpeg", "image/png", "image/tiff", "application/pdf"];
 const MAX_SIZE_MB = 10;
 
 function formatBytes(bytes) {
@@ -31,7 +31,7 @@ export default function UploadPage() {
       return;
     }
     if (!ACCEPTED_TYPES.includes(selected.type)) {
-      setValidationError("Only JPEG, PNG and PDF files are supported.");
+      setValidationError("Only JPEG, PNG, TIFF and PDF files are supported.");
       setFile(null);
       return;
     }
@@ -85,7 +85,7 @@ export default function UploadPage() {
         }`}
       >
         <p className="text-sm text-slate-600">Drag and drop a cheque image or PDF here</p>
-        <p className="mt-1 text-xs text-slate-400">JPEG, PNG or PDF, up to {MAX_SIZE_MB} MB</p>
+        <p className="mt-1 text-xs text-slate-400">JPEG, PNG, TIFF or PDF, up to {MAX_SIZE_MB} MB</p>
         <button
           type="button"
           onClick={() => inputRef.current?.click()}
@@ -96,7 +96,7 @@ export default function UploadPage() {
         <input
           ref={inputRef}
           type="file"
-          accept=".jpg,.jpeg,.png,.pdf"
+          accept=".jpg,.jpeg,.png,.tif,.tiff,.pdf"
           className="hidden"
           onChange={(e) => validateAndSetFile(e.target.files?.[0])}
         />

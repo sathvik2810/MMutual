@@ -14,7 +14,7 @@ import pytest
 from PIL import Image, ImageDraw
 
 from app.services.ocr.engine import OCRRawResult
-from app.services.ocr.tesseract_engine import TesseractOCREngine, get_ocr_engine
+from app.services.ocr.tesseract_engine import TesseractOCREngine, get_ocr_engine, get_tesseract_engine
 
 
 def _text_image(text: str, size=(600, 200)) -> np.ndarray:
@@ -28,8 +28,9 @@ def _text_image(text: str, size=(600, 200)) -> np.ndarray:
 class TestAdapterContract:
     def test_engine_singleton_implements_required_properties(self):
         engine = get_ocr_engine()
-        assert engine.name == "Tesseract"
+        assert engine.name == "PaddleOCR"
         assert isinstance(engine.version, str) and engine.version
+        assert get_tesseract_engine().name == "Tesseract"
 
     def test_run_returns_ocr_raw_result(self):
         engine = TesseractOCREngine()

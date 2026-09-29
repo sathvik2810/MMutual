@@ -204,6 +204,11 @@ def _build_ocr_result_response(cheque_id: str, ocr: dict, extraction: dict) -> O
         signature_region_detected=extraction["signature_region_detected"],
         signature_region_bbox=extraction["signature_region_bbox"],
         extracted_data=extraction["fields"],
+        words=ocr.get("words", []),
+        image_width=ocr.get("image_width", 0),
+        image_height=ocr.get("image_height", 0),
+        extraction_warnings=extraction.get("warnings", []),
+        validation_results=extraction.get("validation_results", {}),
         status=outer_status,
         error_message=ocr.get("error_message"),
     )
@@ -222,6 +227,7 @@ async def run_ocr(cheque_id: str):
         cheque_id=cheque_id,
         status=result["ocr"]["ocr_status"],
         ocr_confidence=result["ocr"]["average_confidence"],
+        engine=result["ocr"]["engine_name"],
     )
 
 

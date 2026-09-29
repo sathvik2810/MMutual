@@ -7,6 +7,8 @@ persistence concerns.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.repositories.cheque_repository import get_cheque_repository
 from app.services.audit import audit_service
 from app.services.extraction.extraction_service import extract_cheque_data
@@ -28,10 +30,9 @@ def run_ocr_and_extraction(cheque_id: str) -> dict:
         )
 
     processed_image_path = preprocessing["processed_image_path"]
-    original_extension = record["file_type"].split("/")[-1]
-    ext_map = {"jpeg": ".jpg", "png": ".png", "pdf": ".pdf"}
+    original_extension = Path(record["file_name"]).suffix.lower() or ".png"
     from app.services.cheque.storage import original_file_path
-    original_path = original_file_path(cheque_id, ext_map.get(original_extension, ".png"))
+    original_path = original_file_path(cheque_id, original_extension)
 
     outcome = run_ocr_for_cheque(processed_image_path, str(original_path))
     ocr_result = outcome.result
@@ -40,6 +41,7 @@ def run_ocr_and_extraction(cheque_id: str) -> dict:
     extraction_result = extract_cheque_data(cheque_id, ocr_result, processed_image)
 
     ocr_dict = {
+        "engine_used": ocr_result.engine_name,
         "engine_name": ocr_result.engine_name,
         "engine_version": ocr_result.engine_version,
         "raw_text": ocr_result.raw_text,
@@ -48,6 +50,13 @@ def run_ocr_and_extraction(cheque_id: str) -> dict:
         "attempts": outcome.attempts,
         "processing_time_ms": round(outcome.total_processing_time_ms, 2),
         "error_message": ocr_result.error_message,
+        "words": [
+            {"text": w.text, "bbox": {"x": w.left, "y": w.top, "width": w.width, "height": w.height},
+             "confidence": w.confidence}
+            for w in ocr_result.words
+        ],
+        "image_width": ocr_result.image_width,
+        "image_height": ocr_result.image_height,
     }
     extraction_dict = extraction_result.as_dict()
 

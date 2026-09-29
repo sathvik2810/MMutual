@@ -14,7 +14,7 @@ import re
 from datetime import datetime
 
 _DIGITS_RE = re.compile(r"\d+")
-_DATE_PATTERN_RE = re.compile(r"\d{1,4}[/\-]\d{1,2}[/\-]\d{1,4}")
+_DATE_PATTERN_RE = re.compile(r"\d{1,4}[/\-.]\d{1,2}[/\-.]\d{1,4}|\d{1,2}[-/ ]+[A-Za-z]{3,9}[-/ ]+\d{2,4}|[A-Za-z]{3,9}\s+\d{1,2},?\s+\d{4}")
 # Contiguous run of digits/commas/dots -- used to locate the numeric
 # portion of an amount while ignoring unrelated punctuation elsewhere in
 # the string (e.g. the period in the "Rs." abbreviation, which is not
@@ -25,7 +25,10 @@ _NUMERIC_RUN_RE = re.compile(r"[\d,.]+")
 # (see scripts/generate_synthetic_data.py); additional common formats are
 # accepted defensively, but none are invented -- an unparseable date
 # normalizes to None rather than a guess.
-_DATE_FORMATS = ("%d/%m/%Y", "%d-%m-%Y", "%Y-%m-%d", "%m/%d/%Y")
+_DATE_FORMATS = ("%d/%m/%Y", "%d-%m-%Y", "%d.%m.%Y", "%Y-%m-%d", "%Y/%m/%d",
+                 "%m/%d/%Y", "%m-%d-%Y", "%d/%m/%y", "%d-%m-%y", "%d.%m.%y",
+                 "%m/%d/%y", "%m-%d-%y", "%d-%b-%Y", "%d-%B-%Y", "%d %b %Y",
+                 "%d %B %Y", "%b %d %Y", "%B %d %Y", "%b %d, %Y", "%B %d, %Y")
 
 
 def normalize_amount(raw_text: str | None) -> float | None:
